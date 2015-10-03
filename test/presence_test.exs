@@ -1,12 +1,15 @@
 defmodule PresenceTest do
   use ExUnit.Case, async: false
+  import ExUnit.CaptureLog
   require Logger
   doctest Presence
 
+  alias Presence.Agent, as: Presence
+
   # New print-callback Presence
   defp newp(node) do
-    Presence.new(node, &Logger.info("join\t#{inspect &1}\t#{inspect &2}"),
-                       &Logger.info("part\t#{inspect &1}\t#{inspect &2}"))
+    {:ok, pid} = Presence.start_link(node, &Logger.info("join #{inspect &1} #{inspect &2}"), &Logger.info("part #{inspect &1} #{inspect &2}"))
+    pid
   end
 
   test "That this is set up correctly" do
@@ -16,51 +19,74 @@ defmodule PresenceTest do
   end
 
   test "User added online is online" do
-    assert [:john] = newp(:a) |> Presence.join(:john) |> Presence.online_users
-    assert [] = newp(:a) |> Presence.join(:john) |> Presence.part(:john) |> Presence.online_users
+    a = newp(:a)
+    assert capture_log(fn -> Presence.join(a, :john) end) =~ ~r"join :john :a"
+    assert [:john] = Presence.online_users(a)
+    assert capture_log(fn -> Presence.part(a, :john) end) =~ ~r"part :john :a"
+    assert [] = Presence.online_users(a)
   end
 
   test "Users from other servers merge" do
-    a = newp(:a) |> Presence.join(:alice)
-    b = newp(:b) |> Presence.join(:bob)
-    assert [:alice, :bob] = Presence.merge(a, b) |> Presence.online_users |> Enum.sort
-    # Commutivity
-    assert [:alice, :bob] = Presence.merge(b, a) |> Presence.online_users |> Enum.sort
-    a1 = a |> Presence.join(:carol) |> Presence.part(:alice)
-    assert [:bob, :carol] = Presence.merge(a1, b) |> Presence.online_users |> Enum.sort
+    a = newp(:a)
+    b = newp(:b)
+
+    assert capture_log(fn -> Presence.join(a, :alice) end) =~ ~r"join :alice :a"
+    assert capture_log(fn -> Presence.join(b, :bob) end) =~ ~r"join :bob :b"
+
+    assert capture_log(fn -> Presence.merge(a, b) end) =~ ~r"join :bob :b"
+    assert [:alice, :bob] = Presence.online_users(a) |> Enum.sort
+
+    assert "" = capture_log(fn -> Presence.merge(a, b) end)
+
+    assert capture_log(fn -> Presence.merge(b, a) end) =~ ~r"join :alice :a"
+    assert "" = capture_log(fn -> Presence.merge(b, a) end)
+    assert capture_log(fn -> Presence.part(a, :alice) end) =~ ~r"part :alice :a"
+
+    assert capture_log(fn -> Presence.merge(b, a) end) =~ ~r"part :alice :a"
+    assert [:bob] = Presence.online_users(b) |> Enum.sort
+    assert "" = capture_log(fn -> Presence.merge(b, a) end)
+
+    assert capture_log(fn -> Presence.join(b, :carol) end) =~ ~r"join :carol :b"
+
+    assert [:bob, :carol] = Presence.online_users(b) |> Enum.sort
+    assert capture_log(fn -> Presence.merge(a, b) end) =~ ~r"join :carol :b"
+    assert "" = capture_log(fn -> Presence.merge(a, b) end)
+
+    assert (Presence.online_users(b) |> Enum.sort) == (Presence.online_users(a) |> Enum.sort)
+
   end
 
   test "Netsplit" do
-    a = newp(:a) |> Presence.join(:alice)
-    b = newp(:b) |> Presence.join(:bob)
-    assert [:alice, :bob] = Presence.merge(a, b) |> Presence.online_users |> Enum.sort
-    assert [:alice, :bob] = Presence.merge(b, a) |> Presence.online_users |> Enum.sort
+    a = newp(:a)
+    b = newp(:b)
+    capture_log(fn ->
+      Presence.join(a, :alice)
+      Presence.join(b, :bob)
+      Presence.merge(a, b)
+    end)
 
-    a1 = a |> Presence.merge(b) |> Presence.join(:carol) |> Presence.part(:alice) |> Presence.join(:david) |> Presence.node_down(:b)
+    assert [:alice, :bob] = Presence.online_users(a) |> Enum.sort
 
-    assert [:carol, :david] = a1 |> Presence.online_users |> Enum.sort
-    assert [:carol, :david] = Presence.merge(a1, b) |> Presence.online_users |> Enum.sort
+    capture_log(fn ->
+      Presence.merge(a, b)
+      Presence.join(a, :carol)
+      Presence.part(a, :alice)
+      Presence.join(a, :david)
+      Presence.node_down(a, :b)
+    end)
 
-    assert [:bob, :carol, :david] = a1 |> Presence.node_up(:b) |> Presence.online_users |> Enum.sort
+    assert [:carol, :david] = Presence.online_users(a) |> Enum.sort
+
+    capture_log(fn ->
+      Presence.merge(a, b)
+    end)
+    assert [:carol, :david] = Presence.online_users(a) |> Enum.sort
+
+    capture_log(fn ->
+      Presence.node_up(a, :b)
+    end)
+
+    assert [:bob, :carol, :david] = Presence.online_users(a) |> Enum.sort
   end
-
-  test "Long tail parts" do
-    a = newp(:a) |> Presence.join(:alice)
-    b = newp(:b) |> Presence.join(:bob) |> Presence.join(:carol) |> Presence.join(:derrick) |> Presence.join(:erica)
-                 |> Presence.part(:carol) |> Presence.part(:derrick) |> Presence.part(:erica)
-    assert [:alice, :bob] = Presence.merge(a, b) |> Presence.online_users |> Enum.sort
-    assert [:alice, :bob] = Presence.merge(b, a) |> Presence.online_users |> Enum.sort
-  end
-
-  test "On both sides of the netsplit" do
-    a = newp(:a) |> Presence.join(:alice) |> Presence.join(:bob)
-    b = newp(:b) |> Presence.join(:bob)
-    assert [:alice, :bob] = Presence.merge(a, b) |> Presence.online_users |> Enum.sort
-    assert [:alice, :bob] = Presence.merge(b, a) |> Presence.online_users |> Enum.sort
-
-    a1 = a |> Presence.merge(b) |> Presence.join(:carol) |> Presence.part(:alice) |> Presence.join(:david) |> Presence.node_down(:b)
-
-    assert [:bob, :carol, :david] = a1 |> Presence.online_users |> Enum.sort
-  end
-
+  
 end

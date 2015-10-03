@@ -90,11 +90,6 @@ defmodule Presence do
     for {node, :down} <- down_nodes(set), do: node
   end
 
-  defp dotin(%Presence{ctx: ctx, cloud: cloud}, {actor, clock}=dot) do
-    # If this exists in the dot, and is greater than the value *or* is in the cloud
-    (ctx[actor]||0) >= clock or Enum.any?(cloud, &(&1==dot))
-  end
-
   @doc """
   Compact the dots.
 
@@ -165,6 +160,11 @@ defmodule Presence do
     end
   end
 
+  defp dotin(%Presence{ctx: ctx, cloud: cloud}, {actor, clock}=dot) do
+    # If this exists in the dot, and is greater than the value *or* is in the cloud
+    (ctx[actor]||0) >= clock or Enum.any?(cloud, &(&1==dot))
+  end
+
   defp do_merge(%{dots: d1, ctx: ctx1, cloud: c1}=dots1, %{dots: d2, ctx: ctx2, cloud: c2}=dots2) do
     new_dots = do_merge_dots(Enum.sort(d1), Enum.sort(d2), {dots1, dots2}, [])
     new_ctx = Dict.merge(ctx1, ctx2, fn (_, a, b) -> max(a, b) end)
@@ -178,45 +178,82 @@ defmodule Presence do
     # Remove when the other knows about our dots in context/cloud, but isn't in
     # their dot values list (they observed a remove)
     # Before we run, we need to notify:
-    Enum.filter(d1, fn ({dot, _}) -> dotin(set2, dot) end)
-    |> Enum.map(fn {{node, _}, user} -> set1.on_part.(user, node) end)
-    new_d1 = Enum.reject(d1, fn ({dot, _}) -> dotin(set2, dot) end)
-    Enum.reverse(acc, new_d1) |> Enum.into %{}
+    my_actor = set1.actor
+    new_dots = Enum.reduce(d1, [], fn ({{node,_}=dot, value}=dotvalue, acc) ->
+      if(dotin(set2, dot)) do
+        if node != my_actor, do: set1.on_part.(value, node)
+        acc
+      else
+        if node != my_actor, do: set1.on_join.(value, node)
+        [dotvalue|acc]
+      end
+    end)
+    Enum.reverse(acc, new_dots) |> Enum.into %{}
   end
   # If we run out of d1
   defp do_merge_dots([], d2, {set1, _}, acc) do
     # Add dot when it is only at the other side. This happens when they've got
     # values that we do not.
-    Enum.filter(d2, fn ({dot, _}) -> dotin(set1, dot) end)
-    |> Enum.map(fn {{node, _}, user} -> set1.on_part.(user, node) end)
-    new_d1 = Enum.reject(d2, fn ({dot, _}) -> dotin(set1, dot) end)
-    Enum.reverse(acc, new_d1) |> Enum.into %{}
+    my_actor = set1.actor
+    new_dots = Enum.reduce(d2, [], fn ({{node,_}=dot, value}=dotvalue, acc) ->
+      if(dotin(set1, dot)) do
+        if node != my_actor, do: set1.on_part.(value, node)
+        acc
+      else
+        if node != my_actor, do: set1.on_join.(value, node)
+        [dotvalue|acc]
+      end
+    end)
+    Enum.reverse(acc, new_dots) |> Enum.into %{}
   end
-  defp do_merge_dots([{clock1,_}=dot1|d1], [{clock2,_}|_]=d2, {_, set2}=sets, acc) when clock1 < clock2 do
-    acc = do_merge_dot(set2, dot1, acc)
+  # If we both got the same dot, just add it into the accumulator and advance both
+  defp do_merge_dots([dot1|d1], [dot2|d2], sets, acc) when dot1 == dot2 do
+    do_merge_dots(d1, d2, sets, [dot1|acc])
+  end
+  defp do_merge_dots([{clock1,_}=dot1|d1], [{clock2,_}|_]=d2, {set1, set2}=sets, acc) when clock1 < clock2 do
+    acc = do_merge_dot(set2, dot1, set1.actor, acc)
     do_merge_dots(d1, d2, sets, acc)
   end
   defp do_merge_dots([{clock1,_}|_]=d1, [{clock2,_}=dot2|d2], {set1, _}=sets, acc) when clock2 < clock1 do
-    acc = do_merge_dot(set1, dot2, acc)
+    acc = do_merge_dot(set1, dot2, set1.actor, acc)
     do_merge_dots(d1, d2, sets, acc)
   end
-  # If we both got the same dot, just add it into the accumulator and advance both
-  defp do_merge_dots([{dot,value1}|d1], [{dot,_}|d2], dots, acc) do
-    do_merge_dots(d1, d2, dots, [{dot, value1}|acc])
-  end
 
-  # Remove if they know about dot1 and they don't have it in their dots
+  # Remove if we know about the dot and they don't have it in their dots
   # Otherwise keep our dot
-  defp do_merge_dot(dots, {{node, _}, value}=dot, acc) do
+  defp do_merge_dot(dots, {{node, _}=dot, value}, actor, acc) do
     if dotin(dots, dot) do
-      dots.on_part.(value, node)
+      if actor != node, do: dots.on_part.(value, node)
+      acc
     else
-      case dot do
-        {{^node, _}, value} -> dots.on_part.(value, node)
-        _ -> nil
-      end
-      [dot|acc]
+      if actor != node, do: dots.on_join.(value, node)
+      [{dot, value}|acc]
     end
   end
+
+end
+
+defmodule Presence.Agent do
+
+  def start_link(node, on_join, on_part) do
+    servers = Enum.into([{node, :up}], %{})
+    Agent.start_link(fn ->
+      %Presence{actor: node, on_part: on_part, on_join: on_join, actor: node, servers: servers}
+    end)
+  end
+
+  def node_down(pid, node), do: Agent.update(pid, &Presence.node_down(&1, node))
+  def node_up(pid, node), do: Agent.update(pid, &Presence.node_up(&1, node))
+
+  def join(pid, user), do: Agent.update(pid, &Presence.join(&1, user))
+  def part(pid, user), do: Agent.update(pid, &Presence.part(&1, user))
+
+  def is_online(pid, user), do: Agent.update(pid, user)
+
+  def online_users(pid), do: Agent.get(pid, &Presence.online_users/1)
+  def offline_users(pid), do: Agent.get(pid, &Presence.offline_users/1)
+
+  def merge(pid, set) when is_pid(set), do: merge(pid, Agent.get(set, &(&1)))
+  def merge(pid, %Presence{}=set), do: Agent.update(pid, &Presence.merge(&1, set))
 
 end
