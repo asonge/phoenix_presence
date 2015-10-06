@@ -165,70 +165,42 @@ defmodule Presence do
     (ctx[actor]||0) >= clock or Enum.any?(cloud, &(&1==dot))
   end
 
-  defp do_merge(%{dots: d1, ctx: ctx1, cloud: c1}=dots1, %{dots: d2, ctx: ctx2, cloud: c2}=dots2) do
-    new_dots = do_merge_dots(Enum.sort(d1), Enum.sort(d2), {dots1, dots2}, [])
+  defp do_merge(%{dots: d1, ctx: ctx1, cloud: c1}=set1, %{dots: d2, ctx: ctx2, cloud: c2}=set2) do
+    # new_dots = do_merge_dots(Enum.sort(d1), Enum.sort(d2), {dots1, dots2}, [])
+    new_dots = Enum.sort(extract_dots(d1, set2) ++ extract_dots(d2, set1))
+               |> merge_dots(set1, %{})
     new_ctx = Dict.merge(ctx1, ctx2, fn (_, a, b) -> max(a, b) end)
     new_cloud = Enum.uniq(c1 ++ c2)
-    compact(%{dots1|dots: new_dots, ctx: new_ctx, cloud: new_cloud})
+    compact(%{set1|dots: new_dots, ctx: new_ctx, cloud: new_cloud})
   end
 
-  # This function requires the use of ORDERED lists.
-  # If we run out of d2, also takes care of case when we run out of both same time.
-  defp do_merge_dots(d1, [], {set1, set2}, acc) do
-    # Remove when the other knows about our dots in context/cloud, but isn't in
-    # their dot values list (they observed a remove)
-    # Before we run, we need to notify:
-    my_actor = set1.actor
-    new_dots = Enum.reduce(d1, [], fn ({{node,_}=dot, value}=dotvalue, acc) ->
-      if(dotin(set2, dot)) do
-        if node != my_actor, do: set1.on_part.(value, node)
-        acc
-      else
-        if node != my_actor, do: set1.on_join.(value, node)
-        [dotvalue|acc]
-      end
-    end)
-    Enum.reverse(acc, new_dots) |> Enum.into %{}
-  end
-  # If we run out of d1
-  defp do_merge_dots([], d2, {set1, _}, acc) do
-    # Add dot when it is only at the other side. This happens when they've got
-    # values that we do not.
-    my_actor = set1.actor
-    new_dots = Enum.reduce(d2, [], fn ({{node,_}=dot, value}=dotvalue, acc) ->
-      if(dotin(set1, dot)) do
-        if node != my_actor, do: set1.on_part.(value, node)
-        acc
-      else
-        if node != my_actor, do: set1.on_join.(value, node)
-        [dotvalue|acc]
-      end
-    end)
-    Enum.reverse(acc, new_dots) |> Enum.into %{}
-  end
-  # If we both got the same dot, just add it into the accumulator and advance both
-  defp do_merge_dots([dot1|d1], [dot2|d2], sets, acc) when dot1 == dot2 do
-    do_merge_dots(d1, d2, sets, [dot1|acc])
-  end
-  defp do_merge_dots([{clock1,_}=dot1|d1], [{clock2,_}|_]=d2, {set1, set2}=sets, acc) when clock1 < clock2 do
-    acc = do_merge_dot(set2, dot1, set1.actor, acc)
-    do_merge_dots(d1, d2, sets, acc)
-  end
-  defp do_merge_dots([{clock1,_}|_]=d1, [{clock2,_}=dot2|d2], {set1, _}=sets, acc) when clock2 < clock1 do
-    acc = do_merge_dot(set1, dot2, set1.actor, acc)
-    do_merge_dots(d1, d2, sets, acc)
+  # Pair each dot with the set opposite it for comparison
+  defp extract_dots(dots, set) do
+    for pair <- dots, do: {pair, set}
   end
 
-  # Remove if we know about the dot and they don't have it in their dots
-  # Otherwise keep our dot
-  defp do_merge_dot(dots, {{node, _}=dot, value}, actor, acc) do
-    if dotin(dots, dot) do
-      if actor != node, do: dots.on_part.(value, node)
+  defp merge_dots([], _, acc), do: acc
+
+  defp merge_dots([{{dot,value}=pair,_}, {pair,_} |rest], set1, acc) do
+    merge_dots(rest, set1, Dict.put(acc, dot, value))
+  end
+
+  # Our dot's values aren't the same. This is an invariant and shouldn't happen. ever.
+  defp merge_dots([{{dot,_},_}, {{dot,_},_}|_], _, _acc) do
+    raise Presence.InvariantError, "2 dot-pairs with the same dot but different values"
+  end
+
+  # Our dots aren't the same.
+  defp merge_dots([{{{actor, clock},value}, oppset}|rest], %{actor: me}=set1, acc) do
+    # Check to see if this dot is in the opposite CRDT
+    new_acc = if dotin(oppset, {actor,clock}) do # It *was* here, we drop it (observed-delete dot-pair)
+      if actor != me, do: set1.on_part.(value, actor)
       acc
-    else
-      if actor != node, do: dots.on_join.(value, node)
-      [{dot, value}|acc]
+    else # If it wasn't here, we keep it (concurrent update)
+      if actor != me, do: set1.on_join.(value, actor)
+      Dict.put(acc, {actor,clock}, value)
     end
+    merge_dots(rest, set1, new_acc)
   end
 
 end
@@ -256,4 +228,8 @@ defmodule Presence.Agent do
   def merge(pid, set) when is_pid(set), do: merge(pid, Agent.get(set, &(&1)))
   def merge(pid, %Presence{}=set), do: Agent.update(pid, &Presence.merge(&1, set))
 
+end
+
+defmodule Presence.Invariant do
+  defexception [:message]
 end
