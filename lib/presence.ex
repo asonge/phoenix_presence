@@ -11,83 +11,93 @@ defmodule Presence do
   @type value :: term
   @type opts :: Keyword.t
 
+  @type joins :: [value]
+  @type parts :: [value]
+
   @opaque t :: %__MODULE__{
     actor: nil,
     dots: %{dot => value},
     ctx: %{actor => clock},
     cloud: [dot],
-    servers: %{},
-    on_join: nil,
-    on_part: nil
+    delta: %{
+      actor: nil,
+      dots: [],
+      cloud: []
+    },
+    servers: %{}
   }
 
   defstruct actor: nil,
             dots: %{}, # A map of dots (version-vector pairs) to values
             ctx: %{},  # Current counter values for actors used in the dots
             cloud: [],  # A set of dots that we've seen but haven't been merged.
-            servers: %{},
-            on_join: nil,
-            on_part: nil
+            delta: %{
+              actor: nil,
+              dots: [],
+              cloud: []
+            },
+            servers: %{}
 
-
-  def new(node, on_join, on_part) do
+  @spec new(term) :: t
+  def new(node) do
     servers = Enum.into([{node, :up}], %{})
-    %Presence{actor: node, on_part: on_part, on_join: on_join, actor: node, servers: servers}
+    %Presence{actor: node, actor: node, servers: servers}
   end
 
+  @spec node_down(t, term) :: {t, joins, parts}
   def node_down(%Presence{servers: servers}=set, node) do
-    ret = %Presence{set|servers: Dict.put(servers, node, :down)}
-    offline_users(ret, fn
-      user, n1 when n1 == node -> set.on_part.(user, node)
-      _, _ -> nil
-    end)
-    ret
+    new_set = %Presence{set|servers: Dict.put(servers, node, :down)}
+    {new_set, [], node_users(new_set, node)}
   end
 
+  @spec node_up(t, term) :: {t, joins, parts}
   def node_up(%Presence{servers: servers}=set, node) do
-    ret = %Presence{set|servers: Dict.put(servers, node, :up)}
-    online_users(ret, fn
-      user, n1 when n1 == node -> set.on_part.(user, node)
-      _, _ -> nil
-    end)
-    ret
+    new_set = %Presence{set|servers: Dict.put(servers, node, :up)}
+    {new_set, node_users(new_set, node), []}
   end
 
-  def join(%Presence{actor: actor}=set, user) do
-    set.on_join.(user, actor)
+  @spec join(t, value) :: t
+  def join(%Presence{}=set, user) do
     add(set, user)
   end
 
-  def part(%Presence{actor: actor}=set, user) do
-    set.on_part.(user, actor)
+  @spec part(t, value) :: t
+  def part(%Presence{}=set, user) do
     remove(set, user)
   end
 
+  @spec is_online(t, value) :: boolean
   def is_online(%Presence{dots: dots}=set, user) do
     down = down_nodes(set)
-    dots |> Enum.any?(fn {{node, _}, user1} -> user1 === user and node in down end)
+    Enum.any?(dots, fn
+      {{node, _}, user1} -> user1 === user and node in down
+      _ -> false
+    end)
   end
 
-  def online_users(set, cb \\ nil) do
-    for {{node,_}, user} <- set.dots, Map.get(set.servers, node, :up) == :up do
-      case cb do
-        nil -> user
-        cb when is_function(cb) -> cb.(user, node)
-      end
+  @spec online_users(t) :: [value]
+  def online_users(%{dots: dots, servers: servers}) do
+    for {{node,_}, user} <- dots, Map.get(servers, node, :up) == :up do
+      user
     end |> Enum.uniq
   end
 
-  def offline_users(set, cb \\ nil) do
-    for {{node,_}, user} <- set.dots, Map.get(set.servers, node, :up) == :down do
-      case cb do
-        nil -> user
-        cb when is_function(cb) -> cb.(user, node)
-      end
+  defp node_users(%{dots: dots}, node) do
+    for {{n,_}, user} <- dots, n===node do
+      {node, user}
     end |> Enum.uniq
   end
 
-  def down_nodes(set) do
-    for {node, :down} <- down_nodes(set), do: node
+  @spec offline_users(t) :: [value]
+  def offline_users(%{dots: dots, servers: servers}) do
+    for {{node,_}, user} <- dots, Map.get(servers, node, :up) == :down do
+      user
+    end |> Enum.uniq
+  end
+
+  @spec down_nodes(t) :: [node]
+  def down_nodes(%Presence{servers: nodes}) do
+    for {node, :down} <- nodes, do: node
   end
 
   @doc """
@@ -104,7 +114,7 @@ defmodule Presence do
 
   Automatically compacts any contiguous dots.
   """
-  @spec merge(t, t) :: t
+  @spec merge(t, t) :: {t, joins, parts}
   def merge(dots1, dots2), do: do_merge(dots1, dots2)
 
   @doc """
@@ -119,12 +129,11 @@ defmodule Presence do
       ctx: Dict.put(ctx, actor, clock) # Add the actor/clock to the context
     }
   end
-  @spec add({t, t}, value) :: {t, t}
 
   @doc """
   Removes a value from the set
   """
-  @spec remove(t | {t, t}, value | (value -> boolean)) :: t | {t, t}
+  @spec remove(t | {t, t}, value | (value -> boolean)) :: t
   def remove(%{dots: dots}=t, pred) when is_function(pred) do
     new_dots = for {dot, v} <- dots, !pred.(v), into: %{}, do: {dot, v}
     %{t|dots: new_dots}
@@ -167,11 +176,11 @@ defmodule Presence do
 
   defp do_merge(%{dots: d1, ctx: ctx1, cloud: c1}=set1, %{dots: d2, ctx: ctx2, cloud: c2}=set2) do
     # new_dots = do_merge_dots(Enum.sort(d1), Enum.sort(d2), {dots1, dots2}, [])
-    new_dots = Enum.sort(extract_dots(d1, set2) ++ extract_dots(d2, set1))
-               |> merge_dots(set1, %{})
+    {new_dots,j,p} = Enum.sort(extract_dots(d1, set2) ++ extract_dots(d2, set1))
+               |> merge_dots(set1, {%{},[],[]})
     new_ctx = Dict.merge(ctx1, ctx2, fn (_, a, b) -> max(a, b) end)
     new_cloud = Enum.uniq(c1 ++ c2)
-    compact(%{set1|dots: new_dots, ctx: new_ctx, cloud: new_cloud})
+    {compact(%{set1|dots: new_dots, ctx: new_ctx, cloud: new_cloud}),j,p}
   end
 
   # Pair each dot with the set opposite it for comparison
@@ -181,8 +190,8 @@ defmodule Presence do
 
   defp merge_dots([], _, acc), do: acc
 
-  defp merge_dots([{{dot,value}=pair,_}, {pair,_} |rest], set1, acc) do
-    merge_dots(rest, set1, Dict.put(acc, dot, value))
+  defp merge_dots([{{dot,value}=pair,_}, {pair,_} |rest], set1, {acc,j,p}) do
+    merge_dots(rest, set1, {Dict.put(acc, dot, value),j,p})
   end
 
   # Our dot's values aren't the same. This is an invariant and shouldn't happen. ever.
@@ -191,42 +200,18 @@ defmodule Presence do
   end
 
   # Our dots aren't the same.
-  defp merge_dots([{{{actor, clock},value}, oppset}|rest], %{actor: me}=set1, acc) do
+  defp merge_dots([{{{actor, clock},value}, oppset}|rest], %{actor: me}=set1, {acc,j,p}) do
     # Check to see if this dot is in the opposite CRDT
     new_acc = if dotin(oppset, {actor,clock}) do # It *was* here, we drop it (observed-delete dot-pair)
-      if actor != me, do: set1.on_part.(value, actor)
-      acc
+      new_p = if actor != me, do: [{actor, value}|p], else: p # set1.on_part.(value, actor)
+      {acc,j,new_p}
     else # If it wasn't here, we keep it (concurrent update)
-      if actor != me, do: set1.on_join.(value, actor)
-      Dict.put(acc, {actor,clock}, value)
+      new_j = if actor != me, do: [{actor,value}|j], else: j # set1.on_join.(value, actor)
+      acc = Dict.put(acc, {actor,clock}, value)
+      {acc,new_j,p}
     end
     merge_dots(rest, set1, new_acc)
   end
-
-end
-
-defmodule Presence.Agent do
-
-  def start_link(node, on_join, on_part) do
-    servers = Enum.into([{node, :up}], %{})
-    Agent.start_link(fn ->
-      %Presence{actor: node, on_part: on_part, on_join: on_join, actor: node, servers: servers}
-    end)
-  end
-
-  def node_down(pid, node), do: Agent.update(pid, &Presence.node_down(&1, node))
-  def node_up(pid, node), do: Agent.update(pid, &Presence.node_up(&1, node))
-
-  def join(pid, user), do: Agent.update(pid, &Presence.join(&1, user))
-  def part(pid, user), do: Agent.update(pid, &Presence.part(&1, user))
-
-  def is_online(pid, user), do: Agent.update(pid, user)
-
-  def online_users(pid), do: Agent.get(pid, &Presence.online_users/1)
-  def offline_users(pid), do: Agent.get(pid, &Presence.offline_users/1)
-
-  def merge(pid, set) when is_pid(set), do: merge(pid, Agent.get(set, &(&1)))
-  def merge(pid, %Presence{}=set), do: Agent.update(pid, &Presence.merge(&1, set))
 
 end
 
