@@ -117,12 +117,12 @@ defmodule Presence do
   @spec merge(t, t) :: {t, joins, parts}
   def merge(dots1, dots2), do: do_merge(dots1, dots2)
 
-  @doc """
-  Adds and associates a value with a new dot for an actor.
-  """
-  @spec add(t, value) :: t
-  def add(%{actor: nil}, _), do: raise ArgumentError, "Actor is required"
-  def add(%{actor: actor, dots: dots, ctx: ctx}=t, value) do
+  # @doc """
+  # Adds and associates a value with a new dot for an actor.
+  # """
+  # @spec add(t, value) :: t
+  defp add(%{actor: nil}, _), do: raise ArgumentError, "Actor is required"
+  defp add(%{actor: actor, dots: dots, ctx: ctx}=t, value) do
     clock = Dict.get(ctx, actor, 0) + 1 # What's the value of our clock?
     %{t |
       dots: Dict.put(dots, {actor, clock}, value), # Add the value to the dot values
@@ -130,16 +130,16 @@ defmodule Presence do
     }
   end
 
-  @doc """
-  Removes a value from the set
-  """
-  @spec remove(t | {t, t}, value | (value -> boolean)) :: t
-  def remove(%{dots: dots}=t, pred) when is_function(pred) do
+  # @doc """
+  # Removes a value from the set
+  # """
+  # @spec remove(t | {t, t}, value | (value -> boolean)) :: t
+  defp remove(%{dots: dots}=t, pred) when is_function(pred) do
     new_dots = for {dot, v} <- dots, !pred.(v), into: %{}, do: {dot, v}
     %{t|dots: new_dots}
   end
-  def remove(_, value) when is_function(value), do: raise ArgumentError, "Illegal dot pattern"
-  def remove(dots, value), do: remove(dots, &(&1==value))
+  defp remove(_, value) when is_function(value), do: raise ArgumentError, "Illegal dot pattern"
+  defp remove(dots, value), do: remove(dots, &(&1==value))
 
   defp do_compact(%{ctx: ctx, cloud: c}=dots) do
     {new_ctx, new_cloud} = compact_reduce(Enum.sort(c), ctx, [])
