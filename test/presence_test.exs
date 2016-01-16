@@ -65,6 +65,24 @@ defmodule PresenceTest do
 
   end
 
+  test "Deltas" do
+    a = newp(:a)
+    b = newp(:b)
+
+    alice = new_conn
+    bob = new_conn
+
+    a = Presence.join(a, alice, "lobby", :alice)
+    b = Presence.join(b, bob, "lobby", :bob)
+
+    {a, d_a} = Presence.delta_reset(a)
+    assert {b, [{_, :alice}], []} = Presence.merge(b, d_a)
+
+    a = Presence.part(a, alice, "lobby")
+    d_a2 = Presence.delta(a)
+    assert {_, [], [{_, :alice}]} = Presence.merge(b, d_a2)
+  end
+
   test "Netsplit" do
     a = newp(:a)
     b = newp(:b)

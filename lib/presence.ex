@@ -96,14 +96,45 @@ defmodule Presence do
     remove(set, &match?({^conn,^topic,_,_}, &1))
   end
 
-  @spec is_online(t, value) :: boolean
-  def is_online(%Presence{dots: dots}=set, user) do
-    down = down_servers(set)
-    Enum.any?(dots, fn
-      {{node, _}, user1} -> user1 === user and node in down
-      _ -> false
-    end)
+  @spec update_metadata(t, conn, topic, metadata | (metadata -> metadata)) :: t
+  def update_metadata(%Presence{dots: dots}=set, conn, topic, fun) when is_function(fun) do
+    [{key, old_metadata}] = for {_,{^conn, ^topic, key, metadata}} <- dots, do: {key, metadata}
+    remove(set, &match?({^conn,^topic,_,_}, &1))
+    |> add({conn, topic, key, fun.(old_metadata)})
   end
+  def update_metadata(set, conn, %{}=new_metadata) do
+    update_metadata(set, conn, fn _ -> new_metadata end)
+  end
+
+  @spec get_by_conn(t, conn) :: [{topic, key, metadata}]
+  def get_by_conn(%Presence{dots: dots}, conn) do
+    for {_, {^conn, topic, key, metadata}} <- dots, do: {topic, key, metadata}
+  end
+
+  @spec get_by_conn(t, conn, topic) :: {key, metadata}
+  def get_by_conn(%Presence{dots: dots}, conn, topic) do
+    [ret] = for {_, {^conn, ^topic, key, metadata}} <- dots, do: {key, metadata}
+    ret
+  end
+
+  @spec get_by_key(t, key) :: [{conn, topic, metadata}]
+  def get_by_key(%Presence{dots: dots}, key) do
+    for {_, {conn, topic, ^key, metadata}} <- dots, do: {conn, topic, metadata}
+  end
+
+  @spec get_by_topic(t, topic) :: [{conn, key, metadata}]
+  def get_by_topic(%Presence{dots: dots}, topic) do
+    for {_, {conn, ^topic, key, metadata}} <- dots, do: {conn, key, metadata}
+  end
+
+  # @spec is_online(t, value) :: boolean
+  # def is_online(%Presence{dots: dots}=set, user) do
+  #   down = down_servers(set)
+  #   Enum.any?(dots, fn
+  #     {{node, _}, user1} -> user1 === user and node in down
+  #     _ -> false
+  #   end)
+  # end
 
   @spec online_users(t) :: [value]
   def online_users(%{dots: dots, servers: servers}) do
@@ -144,7 +175,7 @@ defmodule Presence do
 
   Automatically compacts any contiguous dots.
   """
-  @spec merge(t, t) :: {t, joins, parts}
+  @spec merge(t, t | Presence.Delta.t | [Presence.Delta.t]) :: {t, joins, parts}
   def merge(dots1, dots2), do: do_merge(dots1, dots2)
 
   # @doc """
@@ -178,7 +209,7 @@ defmodule Presence do
     new_ctx = Dict.put(ctx, actor, clock)
     new_dots = for {dot, v} <- dots, !pred.(v), into: %{}, do: {dot, v}
 
-    new_cloud = [{actor, clock}|cloud] ++ new_dots
+    new_cloud = [{actor, clock}|cloud] ++ Enum.filter_map(dots, fn {_, v} -> pred.(v) end, fn {dot,_} -> dot end)
     new_delta_dots = for {dot, v} <- delta_dots, !pred.(v), into: %{}, do: {dot, v}
     new_delta = %{delta| cloud: new_cloud, dots: new_delta_dots}
 
@@ -221,11 +252,11 @@ defmodule Presence do
     (ctx[actor]||0) >= clock or Enum.any?(cloud, &(&1==dot))
   end
 
-  defp do_merge(%{dots: d1, ctx: ctx1, cloud: c1}=set1, %{dots: d2, ctx: ctx2, cloud: c2}=set2) do
+  defp do_merge(%{dots: d1, ctx: ctx1, cloud: c1}=set1, %{dots: d2, cloud: c2}=set2) do
     # new_dots = do_merge_dots(Enum.sort(d1), Enum.sort(d2), {dots1, dots2}, [])
     {new_dots,j,p} = Enum.sort(extract_dots(d1, set2) ++ extract_dots(d2, set1))
                |> merge_dots(set1, {%{},[],[]})
-    new_ctx = Dict.merge(ctx1, ctx2, fn (_, a, b) -> max(a, b) end)
+    new_ctx = Dict.merge(ctx1, Map.get(set2, :ctx, %{}), fn (_, a, b) -> max(a, b) end)
     new_cloud = Enum.uniq(c1 ++ c2)
     {compact(%{set1|dots: new_dots, ctx: new_ctx, cloud: new_cloud}),j,p}
   end
