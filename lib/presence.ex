@@ -1,3 +1,16 @@
+
+defmodule Presence.Delta do
+
+  @type t :: %__MODULE__{
+    cloud: [Presence.dot], # The dots that we know are in this delta
+    dots: %{Presence.dot => Presence.value} # A list of values
+  }
+
+  defstruct dots: %{},
+            cloud: []
+
+end
+
 defmodule Presence do
   @moduledoc """
   A generic structure for associating values with dots (version vector pairs).
@@ -8,67 +21,84 @@ defmodule Presence do
   @type actor :: term
   @type clock :: pos_integer
   @type dot :: {actor, clock}
-  @type value :: term
+  @type ctx_clock :: %{ actor => clock }
+  @type conn :: term
+  @type key :: term
+  @type topic :: term
+  @type metadata :: %{}
+  @type value :: {conn, topic, key, metadata}
   @type opts :: Keyword.t
 
   @type joins :: [value]
   @type parts :: [value]
+  @type noderef :: {node, term}
+  @type node_status :: :up | :down
 
   @opaque t :: %__MODULE__{
     actor: nil,
     dots: %{dot => value},
-    ctx: %{actor => clock},
+    ctx: ctx_clock,
     cloud: [dot],
-    delta: %{
-      actor: nil,
-      dots: [],
-      cloud: []
-    },
-    servers: %{}
+    delta: Presence.Delta.t,
+    servers: %{ noderef => node_status }
   }
 
   defstruct actor: nil,
             dots: %{}, # A map of dots (version-vector pairs) to values
             ctx: %{},  # Current counter values for actors used in the dots
             cloud: [],  # A set of dots that we've seen but haven't been merged.
-            delta: %{
-              actor: nil,
-              dots: [],
-              cloud: []
-            },
+            delta: %Presence.Delta{},
             servers: %{}
 
-  @spec new(term) :: t
-  def new(node) do
+  @spec new(noderef) :: t
+  def new({_,_}=node) do
     servers = Enum.into([{node, :up}], %{})
     %Presence{actor: node, actor: node, servers: servers}
   end
 
-  @spec node_down(t, term) :: {t, joins, parts}
-  def node_down(%Presence{servers: servers}=set, node) do
+  @spec clock(t) :: ctx_clock
+  def clock(%Presence{ctx: ctx_clock}), do: ctx_clock
+
+  @spec delta(t) :: Presence.Delta.t
+  def delta(%Presence{delta: d}), do: d
+
+  @spec delta_reset(t) :: {Presence.t, Presence.Delta.t}
+  def delta_reset(set), do: {reset_delta(set), delta(set)}
+
+  @spec reset_delta(t) :: t
+  def reset_delta(set), do: %Presence{set| delta: %Presence.Delta{}}
+
+  @spec node_down(t, noderef) :: {t, joins, parts}
+  def node_down(%Presence{servers: servers}=set, {_,_}=node) do
     new_set = %Presence{set|servers: Dict.put(servers, node, :down)}
-    {new_set, [], node_users(new_set, node)}
+    {new_set, [], node_users(new_set, node) |> Enum.map(fn {n,v} -> {n,extract_user(v)} end)}
   end
 
-  @spec node_up(t, term) :: {t, joins, parts}
-  def node_up(%Presence{servers: servers}=set, node) do
+  @spec node_up(t, noderef) :: {t, joins, parts}
+  def node_up(%Presence{servers: servers}=set, {_,_}=node) do
     new_set = %Presence{set|servers: Dict.put(servers, node, :up)}
-    {new_set, node_users(new_set, node), []}
+    {new_set, node_users(new_set, node) |> Enum.map(fn {n,v} -> {n,extract_user(v)} end), []}
   end
 
-  @spec join(t, value) :: t
-  def join(%Presence{}=set, user) do
-    add(set, user)
+  @spec join(t, conn, topic, key) :: t
+  @spec join(t, conn, topic, key, metadata) :: t
+  def join(%Presence{}=set, conn, topic, key, metadata \\ %{}) do
+    add(set, {conn, topic, key, metadata})
   end
 
-  @spec part(t, value) :: t
-  def part(%Presence{}=set, user) do
-    remove(set, user)
+  @spec part(t, conn) :: t
+  def part(%Presence{}=set, conn) do
+    remove(set, &match?({^conn,_,_,_}, &1))
+  end
+
+  @spec part(t, conn, topic) :: t
+  def part(%Presence{}=set, conn, topic) do
+    remove(set, &match?({^conn,^topic,_,_}, &1))
   end
 
   @spec is_online(t, value) :: boolean
   def is_online(%Presence{dots: dots}=set, user) do
-    down = down_nodes(set)
+    down = down_servers(set)
     Enum.any?(dots, fn
       {{node, _}, user1} -> user1 === user and node in down
       _ -> false
@@ -77,7 +107,7 @@ defmodule Presence do
 
   @spec online_users(t) :: [value]
   def online_users(%{dots: dots, servers: servers}) do
-    for {{node,_}, user} <- dots, Map.get(servers, node, :up) == :up do
+    for {{node,_}, {_, _, user, _}} <- dots, Map.get(servers, node, :up) == :up do
       user
     end |> Enum.uniq
   end
@@ -90,14 +120,14 @@ defmodule Presence do
 
   @spec offline_users(t) :: [value]
   def offline_users(%{dots: dots, servers: servers}) do
-    for {{node,_}, user} <- dots, Map.get(servers, node, :up) == :down do
+    for {{node,_}, {_, _, user, _}} <- dots, Map.get(servers, node, :up) == :down do
       user
     end |> Enum.uniq
   end
 
-  @spec down_nodes(t) :: [node]
-  def down_nodes(%Presence{servers: nodes}) do
-    for {node, :down} <- nodes, do: node
+  @spec down_servers(t) :: [noderef]
+  def down_servers(%Presence{servers: servers}) do
+    for {node, :down} <- servers, do: node
   end
 
   @doc """
@@ -121,25 +151,39 @@ defmodule Presence do
   # Adds and associates a value with a new dot for an actor.
   # """
   # @spec add(t, value) :: t
-  defp add(%{actor: nil}, _), do: raise ArgumentError, "Actor is required"
-  defp add(%{actor: actor, dots: dots, ctx: ctx}=t, value) do
+  defp add(%Presence{}=set, {_,_,_,_}=value) do
+    %{actor: actor, dots: dots, ctx: ctx, delta: delta} = set
     clock = Dict.get(ctx, actor, 0) + 1 # What's the value of our clock?
-    %{t |
-      dots: Dict.put(dots, {actor, clock}, value), # Add the value to the dot values
-      ctx: Dict.put(ctx, actor, clock) # Add the actor/clock to the context
-    }
+    %{cloud: cloud, dots: delta_dots} = delta
+
+    new_ctx = Dict.put(ctx, actor, clock) # Add the actor/clock to the context
+    new_dots = Dict.put(dots, {actor, clock}, value) # Add the value to the dot values
+
+    new_cloud = [{actor, clock}|cloud]
+    new_delta_dots = Dict.put(delta_dots, {actor,clock}, value)
+
+    new_delta = %{delta| cloud: new_cloud, dots: new_delta_dots}
+    %{set| ctx: new_ctx, delta: new_delta, dots: new_dots}
   end
 
   # @doc """
   # Removes a value from the set
   # """
   # @spec remove(t | {t, t}, value | (value -> boolean)) :: t
-  defp remove(%{dots: dots}=t, pred) when is_function(pred) do
+  defp remove(%Presence{}=set, pred) when is_function(pred) do
+    %{actor: actor, ctx: ctx, dots: dots, delta: delta} = set
+    %{cloud: cloud, dots: delta_dots} = delta
+
+    clock = Dict.get(ctx, actor, 0) + 1
+    new_ctx = Dict.put(ctx, actor, clock)
     new_dots = for {dot, v} <- dots, !pred.(v), into: %{}, do: {dot, v}
-    %{t|dots: new_dots}
+
+    new_cloud = [{actor, clock}|cloud] ++ new_dots
+    new_delta_dots = for {dot, v} <- delta_dots, !pred.(v), into: %{}, do: {dot, v}
+    new_delta = %{delta| cloud: new_cloud, dots: new_delta_dots}
+
+    %{set| ctx: new_ctx, dots: new_dots, delta: new_delta}
   end
-  defp remove(_, value) when is_function(value), do: raise ArgumentError, "Illegal dot pattern"
-  defp remove(dots, value), do: remove(dots, &(&1==value))
 
   defp do_compact(%{ctx: ctx, cloud: c}=dots) do
     {new_ctx, new_cloud} = compact_reduce(Enum.sort(c), ctx, [])
@@ -169,6 +213,9 @@ defmodule Presence do
     end
   end
 
+  defp dotin(%Presence.Delta{cloud: cloud}, {_,_}=dot) do
+    Enum.any?(cloud, &(&1==dot))
+  end
   defp dotin(%Presence{ctx: ctx, cloud: cloud}, {actor, clock}=dot) do
     # If this exists in the dot, and is greater than the value *or* is in the cloud
     (ctx[actor]||0) >= clock or Enum.any?(cloud, &(&1==dot))
@@ -203,15 +250,17 @@ defmodule Presence do
   defp merge_dots([{{{actor, clock},value}, oppset}|rest], %{actor: me}=set1, {acc,j,p}) do
     # Check to see if this dot is in the opposite CRDT
     new_acc = if dotin(oppset, {actor,clock}) do # It *was* here, we drop it (observed-delete dot-pair)
-      new_p = if actor != me, do: [{actor, value}|p], else: p # set1.on_part.(value, actor)
+      new_p = if actor != me, do: [{actor, extract_user(value)}|p], else: p # set1.on_part.(value, actor)
       {acc,j,new_p}
     else # If it wasn't here, we keep it (concurrent update)
-      new_j = if actor != me, do: [{actor,value}|j], else: j # set1.on_join.(value, actor)
+      new_j = if actor != me, do: [{actor, extract_user(value)}|j], else: j # set1.on_join.(value, actor)
       acc = Dict.put(acc, {actor,clock}, value)
       {acc,new_j,p}
     end
     merge_dots(rest, set1, new_acc)
   end
+
+  defp extract_user({_,_,user,_}), do: user
 
 end
 

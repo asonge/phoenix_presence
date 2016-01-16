@@ -7,7 +7,11 @@ defmodule PresenceTest do
 
   # New print-callback Presence
   defp newp(node) do
-    Presence.new(node)
+    Presence.new({node, 1})
+  end
+
+  defp new_conn() do
+    make_ref()
   end
 
   test "That this is set up correctly" do
@@ -18,9 +22,10 @@ defmodule PresenceTest do
 
   test "User added online is online" do
     a = newp(:a)
-    a = Presence.join(a, :john)
+    john = new_conn()
+    a = Presence.join(a, john, "lobby", :john)
     assert [:john] = Presence.online_users(a)
-    a = Presence.part(a, :john)
+    a = Presence.part(a, john, "lobby")
     assert [] = Presence.online_users(a)
   end
 
@@ -28,10 +33,14 @@ defmodule PresenceTest do
     a = newp(:a)
     b = newp(:b)
 
-    a = Presence.join(a, :alice)
-    b = Presence.join(b, :bob)
+    alice = new_conn
+    bob = new_conn
+    carol = new_conn
 
-    # Merging emits a bob part event
+    a = Presence.join(a, alice, "lobby", :alice)
+    b = Presence.join(b, bob, "lobby", :bob)
+
+    # Merging emits a bob join event
     assert {a,[{_,:bob}],[]} = Presence.merge(a, b)
     assert [:alice,:bob] = Presence.online_users(a) |> Enum.sort
 
@@ -39,14 +48,14 @@ defmodule PresenceTest do
     assert {^a,[],[]} = Presence.merge(a, b)
 
     assert {b,[{_,:alice}],[]} = Presence.merge(b, a)
-    assert {^b,[],[]} = Presence.merge(b,a)
-    a = Presence.part(a, :alice)
+    assert {^b,[],[]} = Presence.merge(b, a)
+    a = Presence.part(a, alice, "lobby")
     assert {b,[],[{_,:alice}]} = Presence.merge(b, a)
 
     assert [:bob] = Presence.online_users(b) |> Enum.sort
     assert {^b,[],[]} = Presence.merge(b, a)
 
-    b = Presence.join(b, :carol)
+    b = Presence.join(b, carol, "lobby", :carol)
 
     assert [:bob, :carol] = Presence.online_users(b) |> Enum.sort
     assert {a,[{_,:carol}],[]} = Presence.merge(a, b)
@@ -60,23 +69,28 @@ defmodule PresenceTest do
     a = newp(:a)
     b = newp(:b)
 
-    a = Presence.join(a, :alice)
-    b = Presence.join(b, :bob)
+    alice = new_conn
+    bob = new_conn
+    carol = new_conn
+    david = new_conn
+
+    a = Presence.join(a, alice, "lobby", :alice)
+    b = Presence.join(b, bob, "lobby", :bob)
     {a, [{_, :bob}], _} = Presence.merge(a, b)
 
     assert [:alice, :bob] = Presence.online_users(a) |> Enum.sort
 
-    a = Presence.join(a, :carol)
-    a = Presence.part(a, :alice)
-    a = Presence.join(a, :david)
-    assert {a,[],[{_,:bob}]} = Presence.node_down(a, :b)
+    a = Presence.join(a, carol, "lobby", :carol)
+    a = Presence.part(a, alice, "lobby")
+    a = Presence.join(a, david, "lobby", :david)
+    assert {a,[],[{_,:bob}]} = Presence.node_down(a, {:b,1})
 
     assert [:carol, :david] = Presence.online_users(a) |> Enum.sort
 
     assert {a,[],[]} = Presence.merge(a, b)
     assert [:carol, :david] = Presence.online_users(a) |> Enum.sort
 
-    assert {a,[{_,:bob}],[]} = Presence.node_up(a, :b)
+    assert {a,[{_,:bob}],[]} = Presence.node_up(a, {:b,1})
 
     assert [:bob, :carol, :david] = Presence.online_users(a) |> Enum.sort
   end
