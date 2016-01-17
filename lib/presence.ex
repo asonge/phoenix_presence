@@ -9,7 +9,7 @@ defmodule Presence.Delta do
 
   defstruct dots: %{},
             cloud: [],
-            range: {nil,nil}
+            range: {0,nil}
 
 end
 
@@ -62,13 +62,18 @@ defmodule Presence do
   def clock(%Presence{ctx: ctx_clock}), do: ctx_clock
 
   @spec delta(t) :: Presence.Delta.t
-  def delta(%Presence{delta: d}), do: d
+  def delta(%Presence{delta: d}) do
+    d
+  end
 
   @spec delta_reset(t) :: {Presence.t, Presence.Delta.t}
   def delta_reset(set), do: {reset_delta(set), delta(set)}
 
   @spec reset_delta(t) :: t
-  def reset_delta(set), do: %Presence{set| delta: %Presence.Delta{}}
+  def reset_delta(%Presence{actor: actor, ctx: ctx}=set) do
+    current_clock = Map.get(ctx, actor, 0)
+    %Presence{set| delta: %Presence.Delta{range: {current_clock,nil}}}
+  end
 
   @spec node_down(t, noderef) :: {t, joins, parts}
   def node_down(%Presence{servers: servers}=set, {_,_}=node) do
@@ -281,6 +286,7 @@ defmodule Presence do
   end
 
   # Our dots aren't the same.
+  # TODO: FILTER PARTS AND JOINS FOR DOWN NODES!
   defp merge_dots([{{{actor, _}=dot,value}, oppset}|rest], %{actor: me, delta: delta}=set1, {acc,j,p}) do
     # Check to see if this dot is in the opposite CRDT
     %{cloud: cloud, dots: delta_dots} = delta
@@ -298,7 +304,7 @@ defmodule Presence do
     merge_dots(rest, %{set1| delta: new_delta}, new_acc)
   end
 
-  defp extract_user({_,_,user,_}), do: user
+  # defp extract_user({_,_,user,_}), do: user
 
 end
 
