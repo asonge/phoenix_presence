@@ -3,11 +3,13 @@ defmodule Presence.Delta do
 
   @type t :: %__MODULE__{
     cloud: [Presence.dot], # The dots that we know are in this delta
-    dots: %{Presence.dot => Presence.value} # A list of values
+    dots: %{Presence.dot => Presence.value}, # A list of values
+    range: {Presence.clock, Presence.clock} # What clock range we recorded this from
   }
 
   defstruct dots: %{},
-            cloud: []
+            cloud: [],
+            range: {nil,nil}
 
 end
 
@@ -71,13 +73,13 @@ defmodule Presence do
   @spec node_down(t, noderef) :: {t, joins, parts}
   def node_down(%Presence{servers: servers}=set, {_,_}=node) do
     new_set = %Presence{set|servers: Dict.put(servers, node, :down)}
-    {new_set, [], node_users(new_set, node) |> Enum.map(fn {n,v} -> {n,extract_user(v)} end)}
+    {new_set, [], node_users(new_set, node)}
   end
 
   @spec node_up(t, noderef) :: {t, joins, parts}
   def node_up(%Presence{servers: servers}=set, {_,_}=node) do
     new_set = %Presence{set|servers: Dict.put(servers, node, :up)}
-    {new_set, node_users(new_set, node) |> Enum.map(fn {n,v} -> {n,extract_user(v)} end), []}
+    {new_set, node_users(new_set, node), []}
   end
 
   @spec join(t, conn, topic, key) :: t
@@ -126,15 +128,6 @@ defmodule Presence do
   def get_by_topic(%Presence{dots: dots}, topic) do
     for {_, {conn, ^topic, key, metadata}} <- dots, do: {conn, key, metadata}
   end
-
-  # @spec is_online(t, value) :: boolean
-  # def is_online(%Presence{dots: dots}=set, user) do
-  #   down = down_servers(set)
-  #   Enum.any?(dots, fn
-  #     {{node, _}, user1} -> user1 === user and node in down
-  #     _ -> false
-  #   end)
-  # end
 
   @spec online_users(t) :: [value]
   def online_users(%{dots: dots, servers: servers}) do
@@ -266,10 +259,20 @@ defmodule Presence do
     for pair <- dots, do: {pair, set}
   end
 
+  # I'm still not sure if we need or don't need to extract metadata updates or not
+  # defp merge_dots([], _, {acc,j,p}) do
+  #   {exclusive_j, exlusive_p} = Util.diff(j, p)
+  #   {
+  #     acc,
+  #     Enum.map(exclusive_j, fn {actor, value} -> {actor, extract_user(&1)} end),
+  #     Enum.map(exclusive_p, fn {actor, value} -> {actor, extract_user(&1)} end)
+  #   }
+  # end
+
   defp merge_dots([], _, acc), do: acc
 
   defp merge_dots([{{dot,value}=pair,_}, {pair,_} |rest], set1, {acc,j,p}) do
-    merge_dots(rest, set1, {Dict.put(acc, dot, value),j,p})
+    merge_dots(rest, set1, {Map.put(acc, dot, value),j,p})
   end
 
   # Our dot's values aren't the same. This is an invariant and shouldn't happen. ever.
@@ -278,17 +281,21 @@ defmodule Presence do
   end
 
   # Our dots aren't the same.
-  defp merge_dots([{{{actor, clock},value}, oppset}|rest], %{actor: me}=set1, {acc,j,p}) do
+  defp merge_dots([{{{actor, _}=dot,value}, oppset}|rest], %{actor: me, delta: delta}=set1, {acc,j,p}) do
     # Check to see if this dot is in the opposite CRDT
-    new_acc = if dotin(oppset, {actor,clock}) do # It *was* here, we drop it (observed-delete dot-pair)
-      new_p = if actor != me, do: [{actor, extract_user(value)}|p], else: p # set1.on_part.(value, actor)
-      {acc,j,new_p}
-    else # If it wasn't here, we keep it (concurrent update)
-      new_j = if actor != me, do: [{actor, extract_user(value)}|j], else: j # set1.on_join.(value, actor)
-      acc = Dict.put(acc, {actor,clock}, value)
-      {acc,new_j,p}
+    %{cloud: cloud, dots: delta_dots} = delta
+    {new_acc, new_delta} = if dotin(oppset, dot) do
+      # It *was* here, we drop it (observed-delete dot-pair)
+      new_p = if actor != me, do: [{actor, value}|p], else: p
+      {{acc,j,new_p}, %{delta| cloud: [dot|cloud]}}
+    else
+      # If it wasn't here, we keep it (concurrent update)
+      new_j = if actor != me, do: [{actor, value}|j], else: j
+      acc = Map.put(acc, dot, value)
+      new_delta_dots = Map.put(delta_dots, dot, value)
+      {{acc,new_j,p}, %{delta| cloud: [dot|cloud], dots: new_delta_dots}}
     end
-    merge_dots(rest, set1, new_acc)
+    merge_dots(rest, %{set1| delta: new_delta}, new_acc)
   end
 
   defp extract_user({_,_,user,_}), do: user
