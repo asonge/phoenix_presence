@@ -14,7 +14,7 @@ defmodule Presence.Clock do
     end
   end
 
-  defp filter_clocks(clockset, {node, clock}) do
+  def filter_clocks(clockset, {node, clock}) do
     # The acc in the reduce is a tuple of the new clockset, and the current status
     clockset
     |> Enum.reduce({[], false}, fn {node2, clock2}, {set, insert} ->
