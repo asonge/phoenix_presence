@@ -58,8 +58,11 @@ defmodule Presence do
     %Presence{actor: node, actor: node, servers: servers}
   end
 
+  @spec actor(t) :: actor
+  def actor(%Presence{actor: actor}), do: actor
+
   @spec clock(t) :: ctx_clock
-  def clock(%Presence{ctx: ctx_clock}), do: ctx_clock
+  def clock(%Presence{actor: actor, ctx: ctx_clock}), do: {actor, ctx_clock}
 
   @spec delta(t) :: Presence.Delta.t
   def delta(%Presence{delta: d}) do
