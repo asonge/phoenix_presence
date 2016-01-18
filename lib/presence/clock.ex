@@ -1,9 +1,15 @@
 defmodule Presence.Clock do
 
+  @type context :: Presence.ctx_clock
+  @type nodespec :: term
+  @type nodeclock :: {nodespec, context}
+
+  @spec clockset_nodes([nodeclock]) :: [nodespec]
   def clockset_nodes(clockset) do
     for {node, _} <- clockset, do: node
   end
 
+  @spec append_clock([nodeclock], nodeclock) :: [nodeclock]
   def append_clock(clockset, {_, clock}) when map_size(clock)==0, do: clockset
   def append_clock(clockset, {node, clock}) do
     big_clock = combine_clocks(clockset)
@@ -36,6 +42,7 @@ defmodule Presence.Clock do
     |> Enum.reduce(%{}, &Map.merge(&1, &2, fn _,a,b -> max(a,b) end))
   end
 
+  @spec dominates?(context, context) :: boolean
   # Really fast short-circuit that is just too easy to pass up
   def dominates?(a, b) when map_size(a) < map_size(b), do: false
   def dominates?(a, b) do
@@ -49,7 +56,7 @@ defmodule Presence.Clock do
   defp does_dominate({map, true}), do: map_size(map) == 0
 
   # How we actually know that we dominate for all clocks in a over those clocks in b
-  defp dominates_dot(_, {_, false}), do: false
+  defp dominates_dot(_, {_, false}), do: {nil, false}
   defp dominates_dot({actor_a, clock_a}, {b, true}) do
     case Map.pop(b, actor_a, 0) do
       {n, _} when n > clock_a -> {nil, false}
