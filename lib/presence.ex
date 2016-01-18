@@ -61,7 +61,7 @@ defmodule Presence do
   @spec actor(t) :: actor
   def actor(%Presence{actor: actor}), do: actor
 
-  @spec clock(t) :: ctx_clock
+  @spec clock(t) :: {actor, ctx_clock}
   def clock(%Presence{actor: actor, ctx: ctx_clock}), do: {actor, ctx_clock}
 
   @spec delta(t) :: Presence.Delta.t
@@ -112,8 +112,8 @@ defmodule Presence do
     remove(set, &match?({^conn,^topic,_,_}, &1))
     |> add({conn, topic, key, fun.(old_metadata)})
   end
-  def update_metadata(set, conn, %{}=new_metadata) do
-    update_metadata(set, conn, fn _ -> new_metadata end)
+  def update_metadata(set, conn, topic, %{}=new_metadata) do
+    update_metadata(set, conn, topic, fn _ -> new_metadata end)
   end
 
   @spec get_by_conn(t, conn) :: [{topic, key, metadata}]
